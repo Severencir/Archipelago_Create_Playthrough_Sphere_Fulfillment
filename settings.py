@@ -671,6 +671,21 @@ class GeneratorOptions(Group):
         BASIC = 1
         PLAYTHROUGH = 2
         FULL = 3
+    class PlaythroughMode(IntEnum):
+        """
+        Mode for playthrough generation.
+        0 -> Standard playthrough generation using greedy removal
+        1 -> Sphere regression playthrough generation
+        """
+
+        STANDARD = 0
+        SPHERE_REGRESSION = 1
+
+    class SphereRegressionForks(int):
+        """
+        Number of forks to use in sphere regression playthrough generation.
+        Higher values will result in lower liklihood of unnecessary items in the playthrough, but will take longer to complete.
+        """
 
     class PlandoOptions(str):
         """
@@ -697,6 +712,8 @@ class GeneratorOptions(Group):
     weights_file_path: WeightsFilePath = WeightsFilePath("weights.yaml")
     meta_file_path: MetaFilePath = MetaFilePath("meta.yaml")
     spoiler: Spoiler = Spoiler(3)
+    playthrough_mode: PlaythroughMode = PlaythroughMode(0)
+    sphere_regression_forks: SphereRegressionForks = SphereRegressionForks(6)
     race: Race = Race(0)
     plando_options: PlandoOptions = PlandoOptions("bosses, connections, texts")
     panic_method: PanicMethod = PanicMethod("swap")
