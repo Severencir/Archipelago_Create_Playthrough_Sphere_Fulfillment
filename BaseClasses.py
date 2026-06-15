@@ -1823,6 +1823,9 @@ class Spoiler:
         for item in removed_precollected:
             multiworld.push_precollected(item)
 
+    def create_playthrough_sphere_regression(self, forks: int, create_paths: bool = True) -> None:
+        print(f"Creating playthrough sphere regression with {forks} forks")
+
     def create_paths(self, state: CollectionState, collection_spheres: List[Set[Location]]) -> None:
         from itertools import zip_longest
         multiworld = self.multiworld
