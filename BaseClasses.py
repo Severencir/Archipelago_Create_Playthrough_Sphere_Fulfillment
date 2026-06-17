@@ -1963,7 +1963,7 @@ class Spoiler:
         if create_paths:
             self.create_paths(walk_state, playthrough_spheres)
 
-        if not multiworld.can_beat_game(walk_state):
+        if not multiworld.can_beat_game(CollectionState(multiworld), kept):
             raise Exception("Playthrough failed to beat the game")
 
     @staticmethod
