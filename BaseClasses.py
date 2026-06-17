@@ -1824,7 +1824,171 @@ class Spoiler:
             multiworld.push_precollected(item)
 
     def create_playthrough_sphere_regression(self, forks: int, create_paths: bool = True) -> None:
-        print(f"Creating playthrough sphere regression with {forks} forks")
+        from itertools import chain
+        import heapq
+        import hashlib
+        multiworld = self.multiworld
+        candidates = {location for location in multiworld.get_filled_locations() if location.item.advancement}
+        state = CollectionState(multiworld)
+        player_ids = multiworld.player_ids
+        # spheres partitioned by recepient player for frontier search
+        spheres = []
+        # snapshots of each sphere for regression without rebuilding the state
+        sphere_snapshots = []
+        # which sphere each player's goal is first fulfilled. added to vips as that sphere passes
+        goals_by_sphere = {}
+        # which goals are still unfound, to not recheck found goals
+        goals_unfound = set(player_ids)
+        # vips are goals and locations that are the found prerequisites for other vips. to maintain reachability across the
+        # whole set and ensure the game is beatable. vips must all be met each sphere and pass.
+        vips = set()
+        key_cache = {}
+
+        # wrapper for goals and locations to check if the state fulfills the condition for either.
+        # goals are just another condition that needs to be fulfilled each sphere/pass,
+        # and being able to reorder when the goal is searched allows more variance
+        def is_met(target, q_state) -> bool:
+            if isinstance(target, int):
+                return multiworld.has_beaten_game(q_state, target)
+            return q_state.can_reach(target)
+        # player for a location or goal
+        def owner(target) -> int:
+            if isinstance(target, int):
+                return target
+            return target.player
+        # hashed heap tuple to allow randomized heap ordering for vips with target tiebreaker
+        def heap_entry(target):
+            if target not in key_cache:
+                identity = ("goal", target) if isinstance(target, int) else ("loc", target.player, target.name)
+                h = hashlib.blake2b(repr(identity).encode(), digest_size=8).digest()
+                key_cache[target] = (h, identity, target)
+            return key_cache[target]
+        # linear search of the items belonging to a player in the frontier for one that flips reachability on a target
+        def linear_prereq_search(state, sphere, target):
+            search_state = self.player_state_copy(state, owner(target))
+            for location in sphere[owner(target)]:
+                search_state.collect(location.item, True, location)
+                if is_met(target, search_state):
+                    sphere[owner(target)].remove(location)
+                    return location
+            raise RuntimeError(f"target {target} unreachable after frontier exhausted")
+
+        # sphere building loop. collect items in waves as they become available and populate containers as we go
+        while goals_unfound:
+            if not candidates:
+                raise RuntimeError("No more candidates but still goals unfound")
+            # snapshots represent the lower sphere base that stays consistent for the search, so it's taken before the sphere is processed
+            sphere_snapshots.append(state.copy())
+            sphere = defaultdict(list)
+            reached = [loc for loc in candidates if state.can_reach(loc)]
+            for loc in reached:
+                sphere[loc.item.player].append(loc)
+                state.collect(loc.item, True, loc)
+            candidates.difference_update(reached)
+            spheres.append(sphere)
+
+            sphere_id = len(sphere_snapshots) - 1
+            found_goals = {p for p in goals_unfound if is_met(p, state)}
+            goals_by_sphere[sphere_id] = found_goals
+            goals_unfound -= found_goals
+        # regress through spheres finding a valid set of prerequisites for all goals and vips at each step
+        while spheres:
+            sphere = spheres.pop()
+            state = sphere_snapshots.pop()
+            sphere_id = len(spheres)
+            # goals are stored as a player id int. we need to add them to vips when they become relevant
+            for goal in goals_by_sphere.get(sphere_id, ()):
+                vips.add(goal)
+            # heap for log(n) sorted list behavior to handle thousands of targets
+            heap = [heap_entry(v) for v in vips]
+            heapq.heapify(heap)
+            # blocked set to avoid rechecking targets if they haven't received an item since they were last checked
+            blocked = defaultdict(set)
+            # build a frontier state to allow checking if a target is reachable without other vips before searching.
+            frontier_state = state.copy()
+            for location in chain.from_iterable(sphere.values()):
+                frontier_state.collect(location.item, True, location)
+
+            while heap:
+                _, _, target = heapq.heappop(heap)
+                if target in blocked.get(owner(target), ()):
+                    continue
+                if not is_met(target, frontier_state):
+                    blocked[owner(target)].add(target)
+                    continue
+                # search the frontier for a complete conjunction of items that make a target reachable
+                while not is_met(target, state):
+                    location = linear_prereq_search(state, sphere, target)
+                    # the frontier already includes items committed from it, so they can't change reachability and blocked is still valid
+                    state.collect(location.item, True, location)
+                    vips.add(location)
+                # commit the target to the state once it becomes reachable
+                if isinstance(target, int):
+                    continue
+                state.collect(target.item, True, target)
+                frontier_state.collect(target.item, True, target)
+                # add blocked locations to the heap for the target item's player as they may now be reachable
+                for block in blocked.pop(target.item.player, ()):
+                    heapq.heappush(heap, heap_entry(block))
+
+            # all targets must be reached after a sphere is completed to ensure continuity from sphere 0 to goals
+            if any(blocked.values()):
+                raise RuntimeError("unreachable targets after heap is empty")
+        # remove goals from vips to build the playthrough
+        kept = [vip for vip in vips if not isinstance(vip, int)]
+        # build the playthrough sphere by sphere, collecting items as they are reachable
+        walk_state = CollectionState(multiworld)
+        playthrough_spheres = []
+        remaining = set(kept)
+        while remaining:
+             sphere = {loc for loc in remaining if walk_state.can_reach(loc)}
+             if not sphere:
+                 raise RuntimeError(f"Kept set not beatable; unreachable: {remaining}")
+             for loc in sphere:
+                 walk_state.collect(loc.item, True, loc)
+             playthrough_spheres.append(sphere)
+             remaining -= sphere
+        # start the playthrough with precollected items
+        self.playthrough = {"0": sorted(
+              multiworld.get_name_string_for_object(item)
+              for item in chain.from_iterable(multiworld.precollected_items.values())
+              if item.advancement
+          )}
+        # add playthrough spheres
+        for i, sphere in enumerate(playthrough_spheres):
+            self.playthrough[str(i + 1)] = {
+                str(loc): str(loc.item) for loc in sorted(sphere)
+            }
+
+        if create_paths:
+            self.create_paths(walk_state, playthrough_spheres)
+
+        if not multiworld.can_beat_game(walk_state):
+            raise Exception("Playthrough failed to beat the game")
+
+    @staticmethod
+    def player_state_copy(input_state, player):
+        ret_state = CollectionState.__new__(CollectionState)
+        ret_state.multiworld = input_state.multiworld
+        ret_state.allow_partial_entrances = input_state.allow_partial_entrances
+
+        ret_state.prog_items = dict(input_state.prog_items)
+        ret_state.prog_items[player] = input_state.prog_items[player].copy()
+
+        ret_state.reachable_regions = dict(input_state.reachable_regions)
+        ret_state.reachable_regions[player] = input_state.reachable_regions[player].copy()
+
+        ret_state.stale = dict(input_state.stale)
+        ret_state.locations_checked = input_state.locations_checked.copy()
+        ret_state.advancements = input_state.advancements
+        ret_state.path = input_state.path
+        ret_state.blocked_connections = dict(input_state.blocked_connections)
+        ret_state.blocked_connections[player] = input_state.blocked_connections[player].copy()
+        for function in CollectionState.additional_init_functions:
+            function(ret_state, input_state.multiworld)
+        for function in CollectionState.additional_copy_functions:
+            ret_state = function(input_state, ret_state)
+        return ret_state
 
     def create_paths(self, state: CollectionState, collection_spheres: List[Set[Location]]) -> None:
         from itertools import zip_longest
