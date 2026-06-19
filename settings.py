@@ -713,7 +713,7 @@ class GeneratorOptions(Group):
     meta_file_path: MetaFilePath = MetaFilePath("meta.yaml")
     spoiler: Spoiler = Spoiler(3)
     playthrough_mode: PlaythroughMode = PlaythroughMode(0)
-    sphere_regression_forks: SphereRegressionForks = SphereRegressionForks(6)
+    sphere_regression_forks: SphereRegressionForks = SphereRegressionForks(3)
     race: Race = Race(0)
     plando_options: PlandoOptions = PlandoOptions("bosses, connections, texts")
     panic_method: PanicMethod = PanicMethod("swap")
