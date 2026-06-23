@@ -679,13 +679,7 @@ class GeneratorOptions(Group):
         """
 
         STANDARD = 0
-        SPHERE_REGRESSION = 1
-
-    class SphereRegressionForks(int):
-        """
-        Number of forks to use in sphere regression playthrough generation.
-        Higher values will result in lower liklihood of unnecessary items in the playthrough, but will take longer to complete.
-        """
+        SPHERE_FULFILLMENT = 1
 
     class PlandoOptions(str):
         """
@@ -713,7 +707,6 @@ class GeneratorOptions(Group):
     meta_file_path: MetaFilePath = MetaFilePath("meta.yaml")
     spoiler: Spoiler = Spoiler(3)
     playthrough_mode: PlaythroughMode = PlaythroughMode(0)
-    sphere_regression_forks: SphereRegressionForks = SphereRegressionForks(3)
     race: Race = Race(0)
     plando_options: PlandoOptions = PlandoOptions("bosses, connections, texts")
     panic_method: PanicMethod = PanicMethod("swap")

@@ -1823,10 +1823,14 @@ class Spoiler:
         for item in removed_precollected:
             multiworld.push_precollected(item)
 
-    def create_playthrough_sphere_regression(self, forks: int, create_paths: bool = True) -> None:
+    def create_playthrough_sphere_fulfillment(self, create_paths: bool = True) -> None:
+        # the main angle of this variation is an acknowledgement that can_beat_game, sweep_for_advancements, and
+        # update_reachable_regions are expensive operations to run. the first two can be avoided by ensuring
+        # continuity from sphere 0 to each goal manually. urr can't be avoided, but it is most efficient
+        # if you keep it player scoped. states are also most efficient when used incrementally, and copying a state
+        # is usually expensive, so if you keep it player scoped and only copy the needed player, you can have snapshots
+        # with o(n) complexity.
         from itertools import chain
-        import heapq
-        import hashlib
         multiworld = self.multiworld
         candidates = {location for location in multiworld.get_filled_locations() if location.item.advancement}
         start_state = CollectionState(multiworld)
@@ -1837,9 +1841,7 @@ class Spoiler:
         sphere_snapshots = []
         # which goals are still unfound, to not recheck found goals
         goals_unfound = set(player_ids)
-        key_cache = {}
         tally = Counter()
-        fungibles = set()
 
         # vips are goals and locations that are the found prerequisites for other vips. to maintain reachability across the
         # whole set and ensure the game is beatable. vips must all be met each sphere and pass.
@@ -1849,86 +1851,70 @@ class Spoiler:
         # goals are just another condition that needs to be fulfilled each sphere/pass,
         # and being able to reorder when the goal is searched allows more variance
         def is_met(target, q_state):
-            if isinstance(target, int):
-                return multiworld.has_beaten_game(q_state, target)
+            if isinstance(target, int): return multiworld.has_beaten_game(q_state, target)
             return q_state.can_reach(target)
         # player for a location or goal
         def owner(target) -> int:
-            if isinstance(target, int):
-                return target
-            return target.player
-        def key_of(x):
-            if isinstance(x, int):
-                collapse = ("goal", x)
-                unique = ("goal", x)
-            else:
-                item_key = (x.item.player, x.item.name)
-                collapse = item_key if item_key in fungibles else (x.player, x.name)
-                unique = (x.player, x.name)
-            ck = collapse
-            if ck not in key_cache:
-                key_cache[ck] = hashlib.blake2b(repr(ck).encode(), digest_size=8).digest()
-            return key_cache[ck], unique
-        # hashed heap tuple to allow randomized heap ordering for vips with target tiebreaker
-        def heap_entry(target):
-            h, ident = key_of(target)
-            return (h, ident, target)
-        # linear search of the items belonging to a player in the frontier for one that flips reachability on a target
-        def linear_prereq_search(state, sphere, target):
-            search_state = self.player_state_copy(state, owner(target))
-            for i, location in enumerate(sphere[owner(target)]):
-                search_state.collect(location.item, True, location)
-                if is_met(target, search_state):
-                    return i,location
-            raise RuntimeError(f"target {target} unreachable after frontier exhausted")
+            return target if isinstance(target, int) else target.player
         # binary search of the items belonging to a player in the frontier for one that flips reachability on a target
-        def binary_prereq_search(state, sphere, target):
-            search_base_state = self.player_state_copy(state, owner(target))
-            low, high = 0, len(sphere[owner(target)]) - 1
-            partition_state = self.player_state_copy(search_base_state, owner(target))
+        # a player's locations are only able to be reached by that player's items, so we only need those categories
+        # in the search
+        def binary_prereq_search(state, frontier, target):
+            player = owner(target)
+            search_base_state = self.player_state_copy(state, player)
+            low, high = 0, len(frontier) - 1
+            partition_state = self.player_state_copy(search_base_state, player)
             while low <= high:
                 mid = (low + high) // 2
                 for i in range(low, mid + 1):
-                    location = sphere[owner(target)][i]
+                    location = frontier[i]
                     partition_state.collect(location.item, True, location)
                 if is_met(target, partition_state):
-                    if (low == high):
-                        return low, sphere[owner(target)][low]
+                    if (low == high): return low, frontier[low]
                     high = mid
-                    partition_state = self.player_state_copy(search_base_state, owner(target))
+                    partition_state = self.player_state_copy(search_base_state, player)
                 else:
                     low = mid + 1
-                    search_base_state = self.player_state_copy(partition_state, owner(target))
+                    search_base_state = self.player_state_copy(partition_state, player)
             raise RuntimeError(f"target {target} unreachable after frontier exhausted")
-        def bulk_is_met(locs, state):
-            while locs:
-                if is_met(locs[-1], state):
-                    locs.pop()
-                else:
-                    return False
-            return True
+        # key for sorting locations for determinism
+        def loc_key(loc):
+            if isinstance(loc, int): return (loc, "", loc, "")
+            return (loc.item.player, loc.item.name, loc.player, loc.name)
+        # bulk check reachability of several locations and optionally provide anything collected/not
+        def bulk_is_met(locs, state, missed = None, met = None):
+            result = True
+            locs = list(locs)
+            if missed is not None: missed.clear()
+            if met is not None: met.clear()
+            for loc in locs:
+                if is_met(loc, state):
+                    if met is not None: met.append(loc)
+                    continue
+                result = False
+                if missed is not None: missed.append(loc)
+            return result
+        # like binary search, but for all targets at once, still maintaining the player item-location relationship
+        # but checking in bulk saves operations and eliminates some order problems
         def bulk_binary_search(state, locs, targets, player, fungibles_promoted):
             low, high = 0, len(locs) - 1
             search_stack = [(self.player_state_copy(state, player), low, targets.copy(), 0)]
             results = []
             while search_stack:
                 st, low, tgts, synced = search_stack[-1]
-                for result in results[synced:]:
-                    st.collect(result.item, True, result)
+                for result in results[synced:]: st.collect(result.item, True, result)
                 search_stack[-1] = (st, low, tgts, len(results))
 
-                if bulk_is_met(tgts, st):
+                if bulk_is_met(tgts, st, tgts):
                     search_stack.pop()
                     high = low - 1
                     continue
-                if low > high:
-                    raise RuntimeError("targets unreachable after frontier exhausted")
+                if low > high: raise RuntimeError("targets unreachable after frontier exhausted")
                 tgts = tgts.copy()
                 mid = (low + high) // 2
                 probe_state = self.player_state_copy(st, player)
-                for i in range(low, mid + 1):
-                    probe_state.collect(locs[i].item, True, locs[i])
-                if bulk_is_met(tgts, probe_state):
+                for i in range(low, mid + 1): probe_state.collect(locs[i].item, True, locs[i])
+                if bulk_is_met(tgts, probe_state, tgts):
                     if (low == mid):
                         results.append(locs[mid])
                         if (locs[mid].item.player, locs[mid].item.name) in fungibles:
@@ -1947,13 +1933,14 @@ class Spoiler:
 
         # sphere building loop. collect items in waves as they become available and populate containers as we go
         while goals_unfound:
-            if not candidates:
-                raise RuntimeError("No more candidates but still goals unfound")
+            if not candidates: raise RuntimeError("No more candidates but still goals unfound")
             # snapshots represent the lower sphere base that stays consistent for the search, so it's taken before the sphere is processed
             sphere_snapshots.append(start_state.copy())
             sphere = defaultdict(list)
             reached = [loc for loc in candidates if start_state.can_reach(loc)]
-            tally.update((loc.item.player, loc.item.name) for loc in reached)
+            counts = Counter((loc.item.player, loc.item.name) for loc in reached)
+            reached.sort(key=lambda loc: (counts[loc.item.player, loc.item.name], loc_key(loc)))
+            tally.update(counts)
             for loc in reached:
                 sphere[loc.item.player].append(loc)
                 start_state.collect(loc.item, True, loc)
@@ -1962,120 +1949,102 @@ class Spoiler:
 
             sphere_id = len(sphere_snapshots) - 1
             found_goals = {p for p in goals_unfound if is_met(p, start_state)}
-            for goal in found_goals:
-                seed_vips[sphere_id + 1][goal].add(goal)
+            for goal in found_goals: seed_vips[sphere_id + 1][goal].add(goal)
             goals_unfound -= found_goals
 
         # fungibles are items for which multiple players have the same item. when promoted to vip, we know that all copies
         # in the sphere prefix, and all lower spheres are required to satisfy the prereq and don't need to be found again.
         fungibles = {key for key, count in tally.items() if count > 1}
-
-        def cascade_collect(t_base_state, t_frontier_state, t_target_heap, t_blocked):
-            cascade_blocked = defaultdict(set)
-            while t_target_heap:
-                _, _, target = heapq.heappop(t_target_heap)
-                if target in cascade_blocked.get(owner(target), ()):
-                    continue
-                if is_met(target, t_base_state):
-                    if isinstance(target, int):
-                        continue
-                    t_base_state.collect(target.item, True, target)
-                    t_frontier_state.collect(target.item, True, target)
-                    for block in t_blocked.pop(target.item.player, ()):
-                        heapq.heappush(t_target_heap, heap_entry(block))
-                    for block in cascade_blocked.pop(target.item.player, ()):
-                        heapq.heappush(t_target_heap, heap_entry(block))
-                else:
-                    cascade_blocked[owner(target)].add(target)
-            for block in chain.from_iterable(cascade_blocked.values()):
-                heapq.heappush(t_target_heap, heap_entry(block))
+        # cascade_collect is an efficient way to collect all items reachable from a state that might not yet be collected
+        def cascade_collect(vips, sphere_id, state1, state2=None):
+            unfulfilled = {vip_sphere: {player: set(vip_set) for player, vip_set in player_dicts.items()}
+                           for vip_sphere, player_dicts in vips.items() if vip_sphere > sphere_id}
+            changed_players = None
+            while True:
+                next_changed, progressed = set(), False
+                for player_dicts in unfulfilled.values():
+                    for player, remaining in player_dicts.items():
+                        if not remaining or (changed_players is not None and player not in changed_players):
+                            continue
+                        newly_met = []
+                        bulk_is_met(remaining, state1, None, newly_met)
+                        if not newly_met: continue
+                        recipients = bulk_collect(newly_met, state1)
+                        if state2 is not None: bulk_collect(newly_met, state2)
+                        remaining.difference_update(newly_met)
+                        next_changed |= recipients
+                        progressed = True
+                if not progressed: break
+                changed_players = next_changed
+            return unfulfilled
+        # the workhorse of the method finds most of our locations, but we force collect vips to allow items to use them
+        # as dependencies. this violates the continuity assertion of sphere 0 to goal, and allows circular dependencies
+        # but it undercollects, and can be repaired after
         def process_sphere_bulk_forced(sphere, state, vips, sphere_id, fungibles_promoted):
             targets = defaultdict(list)
             state = state.copy()
             for k, sp in vips.items():
-                if k <= sphere_id:
-                    continue
-                for locs in sp.values():
-                    for loc in locs:
-                        targets[owner(loc)].append(loc)
-                        if isinstance(loc, int):
-                            continue
-                        state.collect(loc.item, True, loc)
+                if k <= sphere_id: continue
+                for loc in chain.from_iterable(sp.values()):
+                    targets[owner(loc)].append(loc)
+                    if not isinstance(loc, int): state.collect(loc.item, True, loc)
             for player, player_targets in targets.items():
-                vips[sphere_id][player].update(bulk_binary_search(state, sphere.get(player, []), player_targets, player, fungibles_promoted))
-
-        def process_sphere(sphere, state, vips, sphere_id, fungibles_promoted, forced = False):
-            target_heap = []
-            for k, sp in vips.items():
-                if k <= sphere_id:
-                    continue
-                for locs in sp.values():
-                    for loc in locs:
-                        target_heap.append(heap_entry(loc))
-                        if not forced:
-                            continue
-                        if isinstance(loc, int):
-                            continue
-                        state.collect(loc.item, True, loc)
-            # heap for log(n) sorted list behavior to handle thousands of targets
-            heapq.heapify(target_heap)
-            # blocked set to avoid rechecking targets if they haven't received an item since they were last checked
-            blocked = defaultdict(set)
-            # build a frontier state to allow checking if a target is reachable without other vips before searching.
+                results = bulk_binary_search(state, sphere.get(player, []), player_targets, player, fungibles_promoted)
+                for result in results: vips[sphere_id][result.player].add(result)
+        # a repair pass. in theory it can output a sufficient set from any sufficient frontier, but it's sole purpose is
+        # to add the dependencies of vips that were not found by the forced pass due to circular dependencies
+        def process_sphere(sphere, state, vips, sphere_id, fungibles_promoted, unfulfilled, reverse_targets = False):
             frontier_state = state.copy()
-            for location in chain.from_iterable(sphere.values()):
-                frontier_state.collect(location.item, True, location)
+            state = state.copy()
+            for loc in chain.from_iterable(sphere.values()): frontier_state.collect(loc.item, True, loc)
 
-            if not forced:
-                cascade_collect(state, frontier_state, target_heap, blocked)
-            while target_heap:
-                _, _, target = heapq.heappop(target_heap)
-                if target in blocked.get(owner(target), ()):
-                    continue
-                if not is_met(target, frontier_state):
-                    blocked[owner(target)].add(target)
-                    continue
-                # search the frontier for a complete conjunction of items that make a target reachable
-                while not is_met(target, state):
-                    index, location = binary_prereq_search(state, sphere, target)
-                    identity = (location.item.player, location.item.name)
-                    # the frontier already includes items committed from it, so they can't change reachability and blocked is still valid
-                    state.collect(location.item, True, location)
-                    sphere[location.item.player].remove(location)
-                    vips[sphere_id][location.player].add(location)
-                    if identity not in fungibles:
-                        continue
-                    #if a fungible item is found, promote it and collect all items up to it
-                    fungibles_promoted.add(identity)
-                    copies = [loc for loc in sphere[owner(target)][:index] if (loc.item.player, loc.item.name) == identity]
-                    for loc in copies:
-                        state.collect(loc.item, True, loc)
-                        sphere[loc.item.player].remove(loc)
-                        vips[sphere_id][loc.player].add(loc)
-                # commit the target to the state once it becomes reachable
-                if isinstance(target, int):
-                    continue
-                # add blocked locations to the heap for the target item's player as they may now be reachable
-                for block in blocked.pop(target.item.player, ()):
-                    heapq.heappush(target_heap, heap_entry(block))
-                if forced:
-                    continue
-                state.collect(target.item, True, target)
-                frontier_state.collect(target.item, True, target)
-                cascade_collect(state, frontier_state, target_heap, blocked)
-            # all targets must be reached after a sphere is completed to ensure continuity from sphere 0 to goals
-            if any(blocked.values()):
-                raise RuntimeError("unreachable targets after heap is empty")
-        def preseed_state(seed, state, sphere):
-            for locs in seed.values():
-                for loc in locs:
-                    if isinstance(loc, int):
-                        continue
-                    if loc in state.locations_checked:
-                        continue
+            while True:
+                # actual unfulfilled locs, lowest sphere first (handles empty-list entries)
+                rem = [(s, p, loc)
+                       for s in sorted(unfulfilled)
+                       for p, locs in sorted(unfulfilled[s].items(), reverse = reverse_targets)
+                       for loc in sorted(locs, key=loc_key, reverse = reverse_targets)]
+                if not rem: break
+                # one target reachable with the full frontier; if none, we're genuinely stuck
+                pick = next(((s, p, loc) for (s, p, loc) in rem if is_met(loc, frontier_state)), None)
+                if pick is None: raise RuntimeError("unfulfilled remaining without promotion")
+                vip_sphere, player, loc = pick
+
+                while not is_met(loc, state):
+                    idx, found = binary_prereq_search(state, sphere.get(player, []), loc)
+                    if (found.item.player, found.item.name) in fungibles:
+                        fungibles_promoted.add((found.item.player, found.item.name))
+                        item_name = found.item.name
+                        while idx > 0 and sphere[player][idx - 1].item.name == item_name:
+                            fungible_loc = sphere[player][idx - 1]
+                            state.collect(fungible_loc.item, True, fungible_loc)
+                            sphere[player].remove(fungible_loc)
+                            vips[sphere_id][fungible_loc.player].add(fungible_loc)
+                            idx -= 1
+                    state.collect(found.item, True, found)
+                    sphere[player].remove(found)
+                    vips[sphere_id][found.player].add(found)
+
+                unfulfilled[vip_sphere][player].remove(loc)
+                if not isinstance(loc, int):
                     state.collect(loc.item, True, loc)
+                    frontier_state.collect(loc.item, True, loc)
+                unfulfilled = cascade_collect(unfulfilled, sphere_id, state, frontier_state)
+        # a simple utility to avoid having to write loops
+        def bulk_collect(seed, state, sphere = None):
+            players_collected = set()
+            if isinstance(seed, list) or isinstance(seed, set):
+                for loc in seed:
+                    if isinstance(loc, int): continue
+                    if loc in state.locations_checked: continue
+                    state.collect(loc.item, True, loc)
+                    players_collected.add(loc.item.player)
+                    if sphere is None: continue
                     sphere[loc.item.player].remove(loc)
-        def run_sphere_regression():
+                return players_collected
+            for locs in seed.values(): players_collected.update(bulk_collect(locs, state, sphere))
+            return players_collected
+        def run_sphere_fulfillment():
             vips = defaultdict(lambda: defaultdict(set))
             for sp in seed_vips:
                 for player in seed_vips[sp]:
@@ -2084,45 +2053,62 @@ class Spoiler:
             fungibles_promoted = set()
             # regress through spheres finding a valid set of prerequisites for all goals and vips at each step
             while sphere_id >= 0:
-                sphere = {player: sorted(locs, key=lambda loc: key_of(loc)) for player, locs in spheres[sphere_id].items()}
+                sphere = {player: locs for player, locs in spheres[sphere_id].items()}
+                second_sphere = {player: locs.copy() for player, locs in spheres[sphere_id].items()}
                 base_state = sphere_snapshots[sphere_id].copy()
-                for loc in list(chain.from_iterable(sphere.values())):
-                    if (loc.item.player, loc.item.name) not in fungibles_promoted:
-                        continue
+                for loc in chain.from_iterable(sphere.values()):
+                    if (loc.item.player, loc.item.name) not in fungibles_promoted: continue
                     vips[sphere_id][loc.player].add(loc)
-                preseed_state(vips[sphere_id], base_state, sphere)
+                bulk_collect(vips[sphere_id], base_state, sphere)
+                second_base_state = base_state.copy()
+                second_vips = defaultdict(set, {player: locs.copy() for player, locs in vips[sphere_id].items()})
+                second_fungibles_promoted = fungibles_promoted.copy()
                 # pass 1 force collects all vips into the frontier to allow most items to be able to use vips as a
                 # dependency since we will already be collecting them. this creates a leaner set, and is much faster
                 # than the unforced pass
-                #forced_sphere = {player: list(locs) for player, locs in sphere.items()}
-                #process_sphere(forced_sphere, base_state.copy(), vips, sphere_id, fungibles_promoted, True)
                 process_sphere_bulk_forced(sphere, base_state, vips, sphere_id, fungibles_promoted)
                 # we need to collect promoted items from the last pass and remove them from the sphere so the next
                 # pass doesn't try to collect them again
-                preseed_state(vips[sphere_id], base_state, sphere)
+                bulk_collect(vips[sphere_id], base_state, sphere)
+                unfulfilled = cascade_collect(vips, sphere_id, base_state)
                 # pass 2 is a "repair" pass that resolves any remaining circular dependencies. it should hypothetically
                 # also resolve any other reachability issues, but the only supported case is circular dependencies
                 # pass 2 is also much faster than the forced pass because it only needs to search for prereqs for
                 # items with circular dependencies, which is rare.
-                process_sphere(sphere, base_state, vips, sphere_id, fungibles_promoted)
+                process_sphere(sphere, base_state, vips, sphere_id, fungibles_promoted, unfulfilled)
+                # after the first two passes, we run the whole process through again in reverse order to shave off
+                # additional unnecessary items. we don't lose complexity, and it makes the kept run near minimal
 
+                # first we reset the sphere to only include items that were kept by the last pass so we at worst keep
+                # the full set it did and also reset the other containers to the start of the sphere to effectively
+                # restart the process.
+                new_sphere = defaultdict(list)
+                for player, locs in second_sphere.items():
+                    for loc in reversed(locs):
+                        if loc in vips[sphere_id][loc.player] and loc not in second_vips[loc.player]:
+                            new_sphere[player].append(loc)
+                vips[sphere_id] = defaultdict(set)
+                for player, locs in second_vips.items(): vips[sphere_id][player] = locs.copy()
+                fungibles_promoted = second_fungibles_promoted.copy()
+                process_sphere_bulk_forced(new_sphere, second_base_state, vips, sphere_id, fungibles_promoted)
+                bulk_collect(vips[sphere_id], second_base_state, new_sphere)
+                unfulfilled = cascade_collect(vips, sphere_id, second_base_state)
+                process_sphere(new_sphere, second_base_state, vips, sphere_id, fungibles_promoted, unfulfilled, True)
                 sphere_id -= 1
             return vips
-        vip_list = [run_sphere_regression() for _ in range(1)]
+        vip_list = run_sphere_fulfillment()
 
 
         # remove goals from vips to build the playthrough
-        kept = [loc for players in vip_list[0].values() for locs in players.values() for loc in locs if not isinstance(loc, int)]
+        kept = [loc for players in vip_list.values() for locs in players.values() for loc in locs if not isinstance(loc, int)]
         # build the playthrough sphere by sphere, collecting items as they are reachable
         walk_state = CollectionState(multiworld)
         playthrough_spheres = []
         remaining = set(kept)
         while remaining:
                 sphere = {loc for loc in remaining if walk_state.can_reach(loc)}
-                if not sphere:
-                    raise RuntimeError(f"Kept set not beatable; unreachable: {remaining}")
-                for loc in sphere:
-                    walk_state.collect(loc.item, True, loc)
+                if not sphere: raise RuntimeError(f"Kept set not beatable; unreachable: {len(remaining)}")
+                for loc in sphere: walk_state.collect(loc.item, True, loc)
                 playthrough_spheres.append(sphere)
                 remaining -= sphere
         # start the playthrough with precollected items
@@ -2133,12 +2119,9 @@ class Spoiler:
             )}
         # add playthrough spheres
         for i, sphere in enumerate(playthrough_spheres):
-            self.playthrough[str(i + 1)] = {
-                str(loc): str(loc.item) for loc in sorted(sphere)
-            }
+            self.playthrough[str(i + 1)] = {str(loc): str(loc.item) for loc in sorted(sphere)}
 
-        if create_paths:
-            self.create_paths(walk_state, playthrough_spheres)
+        if create_paths: self.create_paths(walk_state, playthrough_spheres)
 
         if not multiworld.can_beat_game(CollectionState(multiworld), kept):
             raise RuntimeError("Playthrough failed to beat the game")
@@ -2148,13 +2131,10 @@ class Spoiler:
         ret_state = CollectionState.__new__(CollectionState)
         ret_state.multiworld = input_state.multiworld
         ret_state.allow_partial_entrances = input_state.allow_partial_entrances
-
         ret_state.prog_items = dict(input_state.prog_items)
         ret_state.prog_items[player] = input_state.prog_items[player].copy()
-
         ret_state.reachable_regions = dict(input_state.reachable_regions)
         ret_state.reachable_regions[player] = input_state.reachable_regions[player].copy()
-
         ret_state.stale = dict(input_state.stale)
         ret_state.locations_checked = input_state.locations_checked.copy()
         ret_state.advancements = input_state.advancements
