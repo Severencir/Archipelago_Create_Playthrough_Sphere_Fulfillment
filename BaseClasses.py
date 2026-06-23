@@ -1824,12 +1824,19 @@ class Spoiler:
             multiworld.push_precollected(item)
 
     def create_playthrough_sphere_fulfillment(self, create_paths: bool = True) -> None:
+        try:
+            self.sphere_fulfillment(create_paths)
+        except Exception as e:
+            logging.warning(f"sphere fulfillment failed: {e}; falling back to default")
+            self.create_playthrough(create_paths)
+
+    def sphere_fulfillment(self, create_paths: bool = True) -> None:
         # the main angle of this variation is an acknowledgement that can_beat_game, sweep_for_advancements, and
         # update_reachable_regions are expensive operations to run. the first two can be avoided by ensuring
         # continuity from sphere 0 to each goal manually. urr can't be avoided, but it is most efficient
         # if you keep it player scoped. states are also most efficient when used incrementally, and copying a state
-        # is usually expensive, so if you keep it player scoped and only copy the needed player, you can have snapshots
-        # with o(n) complexity.
+        # is usually expensive, but if you keep it player scoped and only copy the needed players containers without
+        # mutating the others, you can have snapshots with o(n) complexity.
         from itertools import chain
         multiworld = self.multiworld
         candidates = {location for location in multiworld.get_filled_locations() if location.item.advancement}
@@ -1952,8 +1959,9 @@ class Spoiler:
             for goal in found_goals: seed_vips[sphere_id + 1][goal].add(goal)
             goals_unfound -= found_goals
 
-        # fungibles are items for which multiple players have the same item. when promoted to vip, we know that all copies
-        # in the sphere prefix, and all lower spheres are required to satisfy the prereq and don't need to be found again.
+        # fungibles are items for which a player has multiple of the same item. when promoted to vip, we know that all 
+        # copies in the sphere prefix, and all lower spheres are required to satisfy the prereq and don't need to be 
+        # found again.
         fungibles = {key for key, count in tally.items() if count > 1}
         # cascade_collect is an efficient way to collect all items reachable from a state that might not yet be collected
         def cascade_collect(vips, sphere_id, state1, state2=None):
@@ -2126,25 +2134,20 @@ class Spoiler:
         if not multiworld.can_beat_game(CollectionState(multiworld), kept):
             raise RuntimeError("Playthrough failed to beat the game")
 
+    # creates a player-scoped copy of a state. it is intended for use cases where you do not mutate more than one
+    # player's entries and don't need locations_checked.
     @staticmethod
     def player_state_copy(input_state, player):
         ret_state = CollectionState.__new__(CollectionState)
-        ret_state.multiworld = input_state.multiworld
-        ret_state.allow_partial_entrances = input_state.allow_partial_entrances
-        ret_state.prog_items = dict(input_state.prog_items)
-        ret_state.prog_items[player] = input_state.prog_items[player].copy()
-        ret_state.reachable_regions = dict(input_state.reachable_regions)
-        ret_state.reachable_regions[player] = input_state.reachable_regions[player].copy()
-        ret_state.stale = dict(input_state.stale)
-        ret_state.locations_checked = input_state.locations_checked.copy()
-        ret_state.advancements = input_state.advancements
-        ret_state.path = input_state.path
-        ret_state.blocked_connections = dict(input_state.blocked_connections)
-        ret_state.blocked_connections[player] = input_state.blocked_connections[player].copy()
-        for function in CollectionState.additional_init_functions:
-            function(ret_state, input_state.multiworld)
-        for function in CollectionState.additional_copy_functions:
-            ret_state = function(input_state, ret_state)
+        for attr, val in input_state.__dict__.items():
+            if isinstance(val, dict) and player in val:
+                new = dict(val)
+                cp = getattr(new[player], "copy", None)
+                new[player] = cp() if callable(cp) else new[player]
+                setattr(ret_state, attr, new)
+            else:
+                setattr(ret_state, attr, val)
+        ret_state.locations_checked = set()
         return ret_state
 
 
