@@ -1853,6 +1853,7 @@ class Spoiler:
         # vips are goals and locations that are the found prerequisites for other vips. to maintain reachability across the
         # whole set and ensure the game is beatable. vips must all be met each sphere and pass.
         seed_vips= defaultdict(lambda: defaultdict(set))
+        goal_spheres = defaultdict(int)
 
         # wrapper for goals and locations to check if the state fulfills the condition for either.
         # goals are just another condition that needs to be fulfilled each sphere/pass,
@@ -1861,7 +1862,8 @@ class Spoiler:
             if isinstance(target, int): return multiworld.has_beaten_game(q_state, target)
             return q_state.can_reach(target)
         # player for a location or goal
-        def owner(target) -> int:
+        def owner(target):
+            if target in global_locations: return "global"
             return target if isinstance(target, int) else target.player
         # key for sorting locations for determinism
         def loc_key(loc):
@@ -1880,11 +1882,28 @@ class Spoiler:
                 result = False
                 if missed is not None: missed.append(loc)
             return result
+        # a simple utility to avoid having to write loops
+        def bulk_collect(seed, state, sphere = None):
+            players_collected = set()
+            if isinstance(seed, list) or isinstance(seed, set):
+                for loc in seed:
+                    if isinstance(loc, int): continue
+                    if loc in state.locations_checked: continue
+                    state.collect(loc.item, True, loc)
+                    players_collected.add(loc.item.player)
+                    if sphere is None: continue
+                    sphere[loc.item.player].remove(loc)
+                return players_collected
+            for locs in seed.values(): players_collected.update(bulk_collect(locs, state, sphere))
+            return players_collected
         # like binary search, but for all targets at once, still maintaining the player item-location relationship
         # but checking in bulk saves operations and eliminates some order problems
         def bulk_binary_search(state, locs, targets, player, fungibles_promoted):
             low, high = 0, len(locs) - 1
-            search_stack = [(self.player_state_copy(state, player), low, targets.copy(), 0)]
+            if player == "global":
+                search_stack = [(state.copy(), low, targets.copy(), 0)]
+            else:
+                search_stack = [(self.player_state_copy(state, player), low, targets.copy(), 0)]
             results = []
             while search_stack:
                 st, low, tgts, synced = search_stack[-1]
@@ -1898,7 +1917,10 @@ class Spoiler:
                 if low > high: raise RuntimeError("targets unreachable after frontier exhausted")
                 tgts = tgts.copy()
                 mid = (low + high) // 2
-                probe_state = self.player_state_copy(st, player)
+                if player == "global":
+                    probe_state = st.copy()
+                else:
+                    probe_state = self.player_state_copy(st, player)
                 for i in range(low, mid + 1): probe_state.collect(locs[i].item, True, locs[i])
                 if bulk_is_met(tgts, probe_state, tgts):
                     if (low == mid):
@@ -1936,8 +1958,29 @@ class Spoiler:
             sphere_id = len(sphere_snapshots) - 1
             found_goals = {p for p in goals_unfound if is_met(p, start_state)}
             for goal in found_goals: seed_vips[sphere_id + 1][goal].add(goal)
+            for goal in found_goals: goal_spheres[goal] = sphere_id + 1
             goals_unfound -= found_goals
 
+        # test if each of a player's items or goals (indexed by player id) can be met with just their own items, add
+        # them to the global locations if not.
+        global_locations = set()
+        for player in player_ids:
+            state = CollectionState(multiworld)
+            goal_state = None
+            for sphere in range(0, len(spheres)):
+                locations = [loc for loc in chain.from_iterable(spheres[sphere].values()) if loc.player == player]
+                if goal_spheres[player] == sphere: goal_state = state.copy()
+                unmet = []
+                bulk_is_met(locations, state, unmet)
+                bulk_collect(spheres[sphere][player], state)
+                global_locations.update(unmet)
+            if goal_state is None:
+                goal_state = state
+            if not is_met(player, goal_state):
+                global_locations.add(player)
+                sphere = goal_spheres[player]
+                seed_vips[sphere][player].discard(player)
+                seed_vips[sphere]["global"].add(player)
 
         # fungibles are items for which a player has multiple of the same item. when promoted to vip, we know that all
         # copies in the sphere prefix, and all lower spheres are required to satisfy the prereq and don't need to be
@@ -1957,7 +2000,8 @@ class Spoiler:
                 next_changed, progressed, emptied = set(), False, []
                 for sphere, player_dicts in unfulfilled.items():
                     for player, remaining in player_dicts.items():
-                        if not remaining or (changed_players is not None and player not in changed_players):
+                        if not remaining or (changed_players is not None and player not in changed_players and
+                            player != "global"):
                             continue
                         newly_met = []
                         bulk_is_met(remaining, state1, None, newly_met)
@@ -1996,13 +2040,22 @@ class Spoiler:
                 for loc in chain.from_iterable(sp.values()):
                     targets[owner(loc)].append(loc)
                     if not isinstance(loc, int): forced_state.collect(loc.item, True, loc)
+            bulk_search_state = forced_state.copy()
             prospective_vips = defaultdict(list)
             stale_players = set(targets)
             final_flippers = set()
             while True:
+                if targets.get("global", None) and "global" in stale_players:
+                    bulk_search_state = forced_state.copy()
+                    stale_players.discard("global")
+                    global_sphere = list(chain.from_iterable(sphere.values()))
+                    prospective_vips["global"] = bulk_binary_search(bulk_search_state, global_sphere, targets["global"],
+                        "global", set(fungibles_promoted))
+                    bulk_collect(prospective_vips["global"], bulk_search_state)
                 for player, player_targets in targets.items():
                     if player not in stale_players: continue
-                    prospective_vips[player] = bulk_binary_search(forced_state, sphere.get(player, []), player_targets, player, set(fungibles_promoted))
+                    prospective_vips[player] = bulk_binary_search(bulk_search_state, sphere.get(player, []), player_targets,
+                        player, set(fungibles_promoted))
                     stale_players.remove(player)
                 loop_state = state.copy()
                 loop_sphere = {player: sphere_list.copy() for player, sphere_list in sphere.items()}
@@ -2022,7 +2075,11 @@ class Spoiler:
                 while potential_roots:
                     root = potential_roots.pop()
                     root_state = loop_state.copy()
-                    flippers = bulk_binary_search(root_state, loop_sphere.get(owner(root), []), [root], owner(root), set(fungibles_promoted))
+                    if owner(root) == "global":
+                        root_sphere = list(chain.from_iterable(loop_sphere.values()))
+                    else:
+                        root_sphere = loop_sphere.get(owner(root), [])
+                    flippers = bulk_binary_search(root_state, root_sphere, [root], owner(root), set(fungibles_promoted))
                     roots[root] = set(flippers)
                     if not isinstance(root, int): root_state.collect(root.item, True, root)
                     bulk_collect(flippers,root_state)
@@ -2034,39 +2091,32 @@ class Spoiler:
                         roots.pop(loc, None)
                 loop_flippers = set().union(*roots.values())
                 bulk_collect(loop_flippers, forced_state, sphere)
+                bulk_collect(loop_flippers, bulk_search_state)
                 bulk_collect(loop_flippers, state)
                 final_flippers.update(loop_flippers)
-                stale_players.update(loc.item.player for loc in loop_flippers)
+                if "global" in roots:
+                    stale_players = set(targets)
+                else:
+                    stale_players.update(loc.item.player for loc in loop_flippers)
+            final_flippers.update(prospective_vips["global"])
+            prospective_vips.pop("global", None)
             if final_flippers:
                 bulk_collect(prospective_vips, prune_state)
-                cascade_collect(vips, sphere_id, prune_state)
+                residual = cascade_collect(vips, sphere_id, prune_state)
                 for flipper in sorted(final_flippers, key=loc_key):
                     to_collect = final_flippers - {flipper}
                     test_state = prune_state.copy()
                     bulk_collect(to_collect, test_state)
-                    unfulfilled = cascade_collect(vips, sphere_id, test_state)
+                    unfulfilled = cascade_collect(residual, sphere_id, test_state)
                     if not unfulfilled:
                         final_flippers.discard(flipper)
             for loc in chain.from_iterable(prospective_vips.values()):
-                vips[sphere_id][loc.player].add(loc)
+                vips[sphere_id][owner(loc)].add(loc)
                 if (loc.item.player, loc.item.name) in fungibles: fungibles_promoted.add((loc.item.player, loc.item.name))
             for flipper in final_flippers:
-                vips[sphere_id][flipper.player].add(flipper)
+                vips[sphere_id][owner(flipper)].add(flipper)
                 if (flipper.item.player, flipper.item.name) in fungibles: fungibles_promoted.add((flipper.item.player, flipper.item.name))
-        # a simple utility to avoid having to write loops
-        def bulk_collect(seed, state, sphere = None):
-            players_collected = set()
-            if isinstance(seed, list) or isinstance(seed, set):
-                for loc in seed:
-                    if isinstance(loc, int): continue
-                    if loc in state.locations_checked: continue
-                    state.collect(loc.item, True, loc)
-                    players_collected.add(loc.item.player)
-                    if sphere is None: continue
-                    sphere[loc.item.player].remove(loc)
-                return players_collected
-            for locs in seed.values(): players_collected.update(bulk_collect(locs, state, sphere))
-            return players_collected
+
         def run_sphere_fulfillment():
             vips = defaultdict(lambda: defaultdict(set))
             for sp in seed_vips:
@@ -2080,7 +2130,7 @@ class Spoiler:
                 base_state = sphere_snapshots.pop()
                 for loc in chain.from_iterable(sphere.values()):
                     if (loc.item.player, loc.item.name) not in fungibles_promoted: continue
-                    vips[sphere_id][loc.player].add(loc)
+                    vips[sphere_id][owner(loc)].add(loc)
                 bulk_collect(vips[sphere_id], base_state, sphere)
                 process_sphere_bulk_forced(sphere, base_state, vips, sphere_id, fungibles_promoted)
                 sphere_id -= 1
@@ -2115,20 +2165,21 @@ class Spoiler:
         if create_paths: self.create_paths(walk_state, playthrough_spheres)
 
 
-    # creates a player-scoped copy of a state. it is intended for use cases where you do not mutate more than one
-    # player's entries and don't need locations_checked.
+    # creates a player-scoped copy of a state. it is intended for use cases where you do not need more than one
+    # player's entries and don't need shared containers.
     @staticmethod
     def player_state_copy(input_state, player):
         ret_state = CollectionState.__new__(CollectionState)
         for attr, val in input_state.__dict__.items():
             if isinstance(val, dict) and player in val:
-                new = dict(val)
-                cp = getattr(new[player], "copy", None)
-                new[player] = cp() if callable(cp) else new[player]
-                setattr(ret_state, attr, new)
+                cp = getattr(val[player], "copy", None)
+                setattr(ret_state, attr, {player: cp() if callable(cp) else val[player]})
+            elif isinstance(val, defaultdict):
+                setattr(ret_state, attr, defaultdict(val.default_factory))
+            elif callable(getattr(val, "clear", None)):
+                setattr(ret_state, attr, type(val)())
             else:
                 setattr(ret_state, attr, val)
-        ret_state.locations_checked = set()
         return ret_state
 
 
