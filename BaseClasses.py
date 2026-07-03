@@ -2095,6 +2095,7 @@ class Spoiler:
                     for loc in collected_set:
                         roots.pop(loc, None)
                 loop_flippers = set().union(*roots.values())
+                if not loop_flippers: raise RuntimeError("sphere fulfillment unable to satisfy some required locations")
                 bulk_collect(loop_flippers, forced_state, sphere)
                 bulk_collect(loop_flippers, bulk_search_state)
                 bulk_collect(loop_flippers, state)
@@ -2174,11 +2175,12 @@ class Spoiler:
     # player's entries and don't need shared containers.
     @staticmethod
     def player_state_copy(input_state, player):
+        import copy
         ret_state = CollectionState.__new__(CollectionState)
         for attr, val in input_state.__dict__.items():
             if isinstance(val, dict) and player in val:
                 cp = getattr(val[player], "copy", None)
-                setattr(ret_state, attr, {player: cp() if callable(cp) else val[player]})
+                setattr(ret_state, attr, {player: cp() if callable(cp) else copy.deepcopy(val[player])})
             elif isinstance(val, defaultdict):
                 setattr(ret_state, attr, defaultdict(val.default_factory))
             elif callable(getattr(val, "clear", None)):
