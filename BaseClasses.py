@@ -1824,6 +1824,7 @@ class Spoiler:
             multiworld.push_precollected(item)
 
     def create_playthrough_sphere_fulfillment(self, create_paths: bool = True) -> None:
+        import time
         try:
             t1 = time.time()
             self.sphere_fulfillment(create_paths)
