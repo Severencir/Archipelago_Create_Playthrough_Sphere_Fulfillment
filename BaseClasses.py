@@ -1825,7 +1825,10 @@ class Spoiler:
 
     def create_playthrough_sphere_fulfillment(self, create_paths: bool = True) -> None:
         try:
+            t1 = time.time()
             self.sphere_fulfillment(create_paths)
+            t2 = time.time()
+            logging.info(f"sphere fulfillment completed in {t2 - t1:.2f} seconds")
         except Exception as e:
             logging.warning(f"sphere fulfillment failed: {e}; falling back to default")
             self.create_playthrough(create_paths)
@@ -1946,6 +1949,7 @@ class Spoiler:
             sphere_snapshots.append(start_state.copy())
             sphere = defaultdict(list)
             reached = [loc for loc in candidates if start_state.can_reach(loc)]
+            if not reached: raise RuntimeError("goals_unfound with no remaining reachable advancments: {goals_unfound}\n game unbeatable.")
             counts = Counter((loc.item.player, loc.item.name) for loc in reached)
             reached.sort(key=lambda loc: (counts[loc.item.player, loc.item.name], loc_key(loc)))
             tally.update(counts)
