@@ -1833,8 +1833,8 @@ class Spoiler:
             self.sphere_fulfillment(create_paths)
             t2 = time.time()
             logging.info(f"sphere fulfillment completed in {t2 - t1:.2f} seconds")
-        except Exception as e:
-            logging.warning(f"sphere fulfillment failed: {e}; falling back to default")
+        except Exception:
+            logging.exception("sphere fulfillment failed; falling back to default")
             self.create_playthrough(create_paths)
 
     def sphere_fulfillment(self, create_paths: bool = True) -> None:
