@@ -257,7 +257,7 @@ def fill_restrictive(multiworld: MultiWorld, base_state: CollectionState, locati
 def remaining_fill(multiworld: MultiWorld,
                    locations: typing.List[Location],
                    itempool: typing.List[Item],
-                   name: str = "Remaining", 
+                   name: str = "Remaining",
                    move_unplaceable_to_start_inventory: bool = False,
                    check_location_can_fill: bool = False) -> None:
     unplaced_items: typing.List[Item] = []
@@ -493,6 +493,18 @@ def distribute_items_restrictive(multiworld: MultiWorld,
         "there are items in the multiworld itempool that are already placed on locations:\n"
         f"{[(item.location, item) for item in multiworld.itempool if item.location is not None]}"
     )
+
+    # cheap quick guard against unreachable goals to avoid wasting fill and progression balancing time
+    # collect all items and sweep pre_fill advancements because fill doesn't catch when they're unreachable
+    guard_state = multiworld.state.copy()
+    for item in multiworld.itempool:
+        if item.advancement:
+            guard_state.collect(item, True)
+    pre_fill_advancements = [location for location in multiworld.get_locations() if location.item is not None and location.item.advancement]
+    guard_state.sweep_for_advancements(locations=pre_fill_advancements)
+    unreachable_goals = [player for player in multiworld.player_ids if not multiworld.has_beaten_game(guard_state, player)]
+    if unreachable_goals:
+        raise FillError(f"Cannot reach goal for players with all advancements collected: {unreachable_goals}")
 
     fill_locations = sorted(multiworld.get_unfilled_locations())
     multiworld.random.shuffle(fill_locations)
@@ -885,7 +897,7 @@ def balance_multiworld_progression(multiworld: MultiWorld) -> None:
                     items_to_replace.sort()
                     multiworld.random.shuffle(items_to_replace)
 
-                    # Start swapping items. Since we swap into earlier spheres, no need for accessibility checks. 
+                    # Start swapping items. Since we swap into earlier spheres, no need for accessibility checks.
                     while replacement_locations and items_to_replace:
                         old_location = items_to_replace.pop()
                         for i, new_location in enumerate(replacement_locations):
