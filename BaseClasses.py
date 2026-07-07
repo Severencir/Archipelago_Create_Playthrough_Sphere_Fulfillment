@@ -1982,7 +1982,7 @@ class Spoiler:
         while goals_unfound:
             if not candidates:
                 raise RuntimeError("No more candidates but still goals unfound")
-            # snapshots represent the lower sphere base that stays consistent for the search, so it's taken before the 
+            # snapshots represent the lower sphere base that stays consistent for the search, so it's taken before the
             # sphere is processed
             sphere_snapshots.append(start_state.copy())
             sphere = defaultdict(list)
