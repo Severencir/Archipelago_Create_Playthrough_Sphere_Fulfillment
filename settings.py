@@ -671,6 +671,7 @@ class GeneratorOptions(Group):
         BASIC = 1
         PLAYTHROUGH = 2
         FULL = 3
+
     class PlaythroughMode(IntEnum):
         """
         Mode for playthrough generation.
