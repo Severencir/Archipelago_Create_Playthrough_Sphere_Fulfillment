@@ -1824,6 +1824,9 @@ class Spoiler:
             multiworld.push_precollected(item)
 
     def create_playthrough_sphere_fulfillment(self, create_paths: bool = True) -> None:
+        """
+        Wrapper for sphere_fulfillment that logs timing and falls back to default on failure.
+        """
         import time
         try:
             t1 = time.time()
@@ -1835,12 +1838,14 @@ class Spoiler:
             self.create_playthrough(create_paths)
 
     def sphere_fulfillment(self, create_paths: bool = True) -> None:
-        # the main angle of this variation is an acknowledgement that can_beat_game, sweep_for_advancements, and
-        # update_reachable_regions are expensive operations to run. the first two can be avoided by ensuring
-        # continuity from sphere 0 to each goal manually. urr can't be avoided, but it is most efficient
-        # if you keep it player scoped. states are also most efficient when used incrementally, and copying a state
-        # is usually expensive, but if you keep it player scoped and only copy the needed players containers without
-        # mutating the others, you can have snapshots with o(n) complexity.
+        """
+        the main angle of this variation is an acknowledgement that can_beat_game, sweep_for_advancements, and
+        update_reachable_regions are expensive operations to run. the first two can be avoided by ensuring
+        continuity from sphere 0 to each goal manually. urr can't be avoided, but it is most efficient
+        if you keep it player scoped. states are also most efficient when used incrementally, and copying a state
+        is usually expensive, but if you keep it player scoped and only copy the needed players containers without
+        mutating the others, you can have snapshots with o(n) complexity.
+        """
         from itertools import chain
         multiworld = self.multiworld
         candidates = {location for location in multiworld.get_filled_locations() if location.item.advancement}
@@ -1854,9 +1859,9 @@ class Spoiler:
         goals_unfound = set(player_ids)
         tally = Counter()
 
-        # vips are goals and locations that are the found prerequisites for other vips. to maintain reachability across the
-        # whole set and ensure the game is beatable. vips must all be met each sphere and pass.
-        seed_vips= defaultdict(lambda: defaultdict(set))
+        # vips are goals and locations that are the found prerequisites for other vips. to maintain reachability across
+        # the whole set and ensure the game is beatable. vips must all be met each sphere and pass.
+        seed_vips = defaultdict(lambda: defaultdict(set))
         goal_spheres = defaultdict(int)
 
         # wrapper for goals and locations to check if the state fulfills the condition for either.
@@ -1977,7 +1982,8 @@ class Spoiler:
         while goals_unfound:
             if not candidates:
                 raise RuntimeError("No more candidates but still goals unfound")
-            # snapshots represent the lower sphere base that stays consistent for the search, so it's taken before the sphere is processed
+            # snapshots represent the lower sphere base that stays consistent for the search, so it's taken before the 
+            # sphere is processed
             sphere_snapshots.append(start_state.copy())
             sphere = defaultdict(list)
             reached = [location for location in candidates if start_state.can_reach(location)]
@@ -2030,7 +2036,7 @@ class Spoiler:
         # copies in the sphere prefix, and all lower spheres are required to satisfy the prereq and don't need to be
         # found again.
         fungibles = {key for key, count in tally.items() if count > 1}
-        # cascade_collect is an efficient way to collect all items reachable from a state that might not yet be collected
+        # cascade_collect is an efficient sweep of reachable from a state that might not yet be collected
         def cascade_collect(
             to_check: dict[int, dict[int | str, set[int | Location]]],
             sphere_id: int,
@@ -2107,8 +2113,12 @@ class Spoiler:
                     bulk_search_state = forced_state.copy()
                     stale_players.discard("global")
                     global_sphere = list(chain.from_iterable(sphere.values()))
-                    prospective_vips["global"] = bulk_binary_search(bulk_search_state, global_sphere, targets["global"],
-                        "global", set(fungibles_promoted))
+                    prospective_vips["global"] = bulk_binary_search(
+                        bulk_search_state,
+                        global_sphere,
+                        targets["global"],
+                        "global", set(fungibles_promoted)
+                    )
                     bulk_collect(prospective_vips["global"], bulk_search_state)
                 for player, player_targets in targets.items():
                     if player not in stale_players:
@@ -2145,11 +2155,17 @@ class Spoiler:
                         root_sphere = list(chain.from_iterable(loop_sphere.values()))
                     else:
                         root_sphere = loop_sphere.get(owner(root), [])
-                    flippers = bulk_binary_search(root_state, root_sphere, [root], owner(root), set(fungibles_promoted))
+                    flippers = bulk_binary_search(
+                        root_state,
+                        root_sphere,
+                        [root],
+                        owner(root),
+                        set(fungibles_promoted)
+                    )
                     roots[root] = set(flippers)
                     if not isinstance(root, int):
                         root_state.collect(root.item, True, root)
-                    bulk_collect(flippers,root_state)
+                    bulk_collect(flippers, root_state)
                     collected_set = set()
                     cascade_collect(unfulfilled, sphere_id, root_state, None, collected_set)
                     collected_set.discard(root)
@@ -2224,13 +2240,13 @@ class Spoiler:
         playthrough_spheres = []
         remaining = set(kept)
         while remaining:
-                sphere = {location for location in remaining if walk_state.can_reach(location)}
-                if not sphere:
-                    raise RuntimeError(f"Kept set not beatable; unreachable: {len(remaining)}")
-                for location in sphere:
-                    walk_state.collect(location.item, True, location)
-                playthrough_spheres.append(sphere)
-                remaining -= sphere
+            sphere = {location for location in remaining if walk_state.can_reach(location)}
+            if not sphere:
+                raise RuntimeError(f"Kept set not beatable; unreachable: {len(remaining)}")
+            for location in sphere:
+                walk_state.collect(location.item, True, location)
+            playthrough_spheres.append(sphere)
+            remaining -= sphere
         # start the playthrough with precollected items
         self.playthrough = {"0": sorted(
                 multiworld.get_name_string_for_object(item)
@@ -2244,11 +2260,12 @@ class Spoiler:
         if create_paths:
             self.create_paths(walk_state, playthrough_spheres)
 
-
-    # creates a player-scoped copy of a state. it is intended for use cases where you do not need more than one
-    # player's entries and don't need shared containers.
     @staticmethod
-    def player_state_copy(input_state, player):
+    def player_state_copy(input_state: CollectionState, player: int) -> CollectionState:
+        """
+        Creates a player-scoped copy of a state. It is intended for use cases where you do not need more than one
+        player's entries and don't need shared containers.
+        """
         import copy
         ret_state = CollectionState.__new__(CollectionState)
         for attr, val in input_state.__dict__.items():
