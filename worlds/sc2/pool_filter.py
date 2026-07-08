@@ -147,10 +147,10 @@ class ValidInventory:
 
     def count_from_list_unique(self, items: Iterable[str], player: int) -> int:
         result = 0
-        for val in my_dict.values():
-            if val > 0:
+        for item in items:
+            if self.logical_inventory[item] > 0:
                 result += 1
-        return result        
+        return result 
 
     def generate_reduced_inventory(self, inventory_size: int, filler_amount: int, mission_requirements: List[Tuple[str, Callable]]) -> List[StarcraftItem]:
         """Attempts to generate a reduced inventory that can fulfill the mission requirements."""
