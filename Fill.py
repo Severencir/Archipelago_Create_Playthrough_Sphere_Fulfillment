@@ -500,9 +500,15 @@ def distribute_items_restrictive(multiworld: MultiWorld,
     for item in multiworld.itempool:
         if item.advancement:
             guard_state.collect(item, True)
-    pre_fill_advancements = [location for location in multiworld.get_locations() if location.item is not None and location.item.advancement]
+    pre_fill_advancements = [
+        location for location in multiworld.get_locations()
+        if location.item is not None and location.item.advancement
+    ]
     guard_state.sweep_for_advancements(locations=pre_fill_advancements)
-    unreachable_goals = [player for player in multiworld.player_ids if not multiworld.has_beaten_game(guard_state, player)]
+    unreachable_goals = [
+        player for player in multiworld.player_ids
+        if not multiworld.has_beaten_game(guard_state, player)
+    ]
     if unreachable_goals:
         raise FillError(f"Cannot reach goal for players with all advancements collected: {unreachable_goals}")
 
